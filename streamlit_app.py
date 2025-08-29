@@ -2,12 +2,12 @@ import streamlit as st
 import os
 import zipfile
 import tempfile
-import shutil
 import base64
 import requests
+import re
 
-# --- Helper Functions ---
 def call_gemini_api(prompt, api_key):
+    # Gemini API call
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -30,14 +30,27 @@ def call_gemini_api(prompt, api_key):
             "parts": [{"text": prompt}]
         }]
     }
-    # Replace with Gemini endpoint
     endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContentStream"
     resp = requests.post(endpoint, headers=headers, json=data, stream=True)
     output = ""
     for line in resp.iter_lines():
         if line:
-            output += line.decode("utf-8")
+            try:
+                output += line.decode("utf-8")
+            except Exception:
+                pass
     return output
+
+def extract_code(tag, text):
+    # Try code fence first
+    m = re.search(rf"{tag}\s*```(?:python|txt|markdown)?\s*(.*?)```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Fallback: Try plain text after tag
+    m = re.search(rf"{tag}:(.*?)(?:\n\S|$)", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 def create_app_files(app_code, requirements, readme):
     temp_dir = tempfile.mkdtemp()
@@ -47,7 +60,7 @@ def create_app_files(app_code, requirements, readme):
         "README.md": readme,
     }
     for fname, content in files.items():
-        with open(os.path.join(temp_dir, fname), "w") as f:
+        with open(os.path.join(temp_dir, fname), "w", encoding="utf-8") as f:
             f.write(content)
     return temp_dir
 
@@ -116,11 +129,7 @@ Create 3 files:
 Application prompt: {prompt}
 """
             output = call_gemini_api(meta_prompt, api_key)
-            # Parse output for files (simple heuristics)
-            def extract_code(tag, text):
-                import re
-                match = re.search(rf"{tag}\s*```(?:python|txt|markdown)?\s*(.*?)```", text, re.DOTALL)
-                return match.group(1).strip() if match else ""
+            st.write("Raw Gemini output:", output)  # For debugging, remove if not needed.
             st.session_state.app_code = extract_code("app.py", output)
             st.session_state.requirements = extract_code("requirements.txt", output)
             st.session_state.readme = extract_code("README.md", output)
