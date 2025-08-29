@@ -1,164 +1,120 @@
+# main.py — Invision Code.AI
+
 import streamlit as st
 import os
 import zipfile
+import shutil
 import tempfile
-import base64
-import requests
-import re
+import subprocess
+from pathlib import Path
+from google import genai
+from google.genai import types
 
-def call_gemini_api(prompt, api_key):
-    # Gemini API call
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    data = {
-        "model": "gemini-2.5-flash",
-        "config": {
-            "temperature": 2,
-            "maxOutputTokens": 65535,
-            "thinkingConfig": {"thinkingBudget": 0},
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_LOW_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_LOW_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_LOW_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_LOW_AND_ABOVE"}
-            ]
-        },
-        "contents": [{
-            "role": "user",
-            "parts": [{"text": prompt}]
-        }]
-    }
-    endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContentStream"
-    resp = requests.post(endpoint, headers=headers, json=data, stream=True)
-    output = ""
-    for line in resp.iter_lines():
-        if line:
-            try:
-                output += line.decode("utf-8")
-            except Exception:
-                pass
-    return output
+# ----------------------------------------------------
+# Gemini Client (Streamlit settings for API Key)
+# ----------------------------------------------------
+def get_gemini_client():
+    return genai.Client(
+        api_key=st.secrets["GEMINI_API_KEY"]  # pulled from Streamlit settings / Cloud
+    )
 
-def extract_code(tag, text):
-    # Try code fence first
-    m = re.search(rf"{tag}\s*```(?:python|txt|markdown)?\s*(.*?)```", text, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    # Fallback: Try plain text after tag
-    m = re.search(rf"{tag}:(.*?)(?:\n\S|$)", text, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    return ""
+# ----------------------------------------------------
+# Generate Code using Gemini
+# ----------------------------------------------------
+def generate_code(prompt: str) -> dict:
+    client = get_gemini_client()
+    model = "gemini-2.5-flash"
+    contents = [
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=prompt)],
+        ),
+    ]
+    config = types.GenerateContentConfig(
+        temperature=1,
+        max_output_tokens=65535,
+        safety_settings=[],
+    )
+    response = client.models.generate_content(model=model, contents=contents, config=config)
+    return {"app.py": response.text}
 
-def create_app_files(app_code, requirements, readme):
-    temp_dir = tempfile.mkdtemp()
-    files = {
-        "app.py": app_code,
-        "requirements.txt": requirements,
-        "README.md": readme,
-    }
-    for fname, content in files.items():
-        with open(os.path.join(temp_dir, fname), "w", encoding="utf-8") as f:
+# ----------------------------------------------------
+# Package files into zip
+# ----------------------------------------------------
+def package_project(files: dict) -> str:
+    tmpdir = tempfile.mkdtemp()
+    for filename, content in files.items():
+        with open(os.path.join(tmpdir, filename), "w", encoding="utf-8") as f:
             f.write(content)
-    return temp_dir
 
-def zip_dir(dir_path):
-    zip_path = os.path.join(tempfile.gettempdir(), "invision_code_ai.zip")
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        for foldername, subfolders, filenames in os.walk(dir_path):
+    # Default files
+    with open(os.path.join(tmpdir, "requirements.txt"), "w") as f:
+        f.write("streamlit\npython-dotenv\ngoogle-genai\n")
+
+    with open(os.path.join(tmpdir, ".env"), "w") as f:
+        f.write("GEMINI_API_KEY=your-generated-app-key\n")
+
+    with open(os.path.join(tmpdir, "README.md"), "w") as f:
+        f.write("# Generated Streamlit App\n\nRun with:\n```\nstreamlit run app.py\n```")
+
+    zip_path = os.path.join(tmpdir, "project.zip")
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        for root, _, filenames in os.walk(tmpdir):
             for filename in filenames:
-                file_path = os.path.join(foldername, filename)
-                arcname = os.path.relpath(file_path, dir_path)
-                zipf.write(file_path, arcname)
+                if filename != "project.zip":
+                    zipf.write(os.path.join(root, filename), arcname=filename)
+
     return zip_path
 
-def get_zip_download_link(zip_path):
-    with open(zip_path, "rb") as f:
-        data = f.read()
-    b64 = base64.b64encode(data).decode()
-    href = f'<a href="data:application/zip;base64,{b64}" download="invision_code_ai.zip">Download ZIP</a>'
-    return href
-
-def run_generated_app(code):
-    try:
-        local_vars = {}
-        exec(code, {}, local_vars)
-    except Exception as e:
-        st.error(f"Error running generated app: {e}")
-
-# --- Streamlit UI ---
+# ----------------------------------------------------
+# Streamlit Tabs
+# ----------------------------------------------------
 st.set_page_config(page_title="Invision Code.AI", layout="wide")
+st.title("💡 Invision Code.AI — Streamlit Application Generator")
 
-if "app_code" not in st.session_state:
-    st.session_state.app_code = ""
-if "requirements" not in st.session_state:
-    st.session_state.requirements = ""
-if "readme" not in st.session_state:
-    st.session_state.readme = ""
-if "last_prompt" not in st.session_state:
-    st.session_state.last_prompt = ""
+tab1, tab2, tab3 = st.tabs(["💬 Chat", "📂 Code & Download", "🚀 Preview"])
 
-st.sidebar.title("Invision Code.AI Admin")
-if "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    st.sidebar.success("Gemini API Key loaded from Streamlit secrets.")
-else:
-    api_key = None
-    st.sidebar.error("Please add GEMINI_API_KEY to your Streamlit secrets!")
+# --- Tab 1: Chat Interface ---
+with tab1:
+    st.subheader("Describe the app you want to build")
+    user_prompt = st.text_area("Prompt", height=200)
+    if st.button("Generate App Code"):
+        if user_prompt.strip():
+            with st.spinner("Generating with Gemini..."):
+                files = generate_code(user_prompt)
+                st.session_state["files"] = files
+                st.success("Code generated!")
 
-tabs = st.tabs(["Chat", "Generated Files", "Preview"])
+# --- Tab 2: Generated Code & Download ---
+with tab2:
+    st.subheader("Generated Files")
+    if "files" in st.session_state:
+        for filename, content in st.session_state["files"].items():
+            st.download_button(
+                f"Download {filename}",
+                data=content,
+                file_name=filename,
+                mime="text/plain",
+            )
+            st.code(content, language="python")
 
-with tabs[0]:
-    st.header("AI Chat Interface")
-    prompt = st.text_area("Describe your Streamlit application requirements:", height=200)
-    if st.button("Generate Application", key="generate_app"):
-        if not api_key:
-            st.error("No Gemini API Key found in Streamlit secrets.")
-        elif not prompt:
-            st.warning("Please write a prompt to describe your application.")
-        else:
-            st.info("Generating application... this may take a while with max tokens.")
-            meta_prompt = f"""
-Generate a fully working Streamlit application in Python based on the following user prompt. All code must use Streamlit ONLY.
-Create 3 files: 
-1. app.py (main Streamlit app code)
-2. requirements.txt (all dependencies, include streamlit)
-3. README.md (usage instructions).
-Application prompt: {prompt}
-"""
-            output = call_gemini_api(meta_prompt, api_key)
-            st.write("Raw Gemini output:", output)  # For debugging, remove if not needed.
-            st.session_state.app_code = extract_code("app.py", output)
-            st.session_state.requirements = extract_code("requirements.txt", output)
-            st.session_state.readme = extract_code("README.md", output)
-            st.session_state.last_prompt = prompt
-            st.success("Generation complete. See files and preview in next tabs.")
-
-with tabs[1]:
-    st.header("Generated Files")
-    if st.session_state.app_code:
-        st.subheader("app.py")
-        st.code(st.session_state.app_code, language="python")
-        st.subheader("requirements.txt")
-        st.code(st.session_state.requirements, language="text")
-        st.subheader("README.md")
-        st.code(st.session_state.readme, language="markdown")
-        temp_dir = create_app_files(
-            st.session_state.app_code,
-            st.session_state.requirements,
-            st.session_state.readme
-        )
-        zip_path = zip_dir(temp_dir)
-        st.markdown(get_zip_download_link(zip_path), unsafe_allow_html=True)
+        zip_path = package_project(st.session_state["files"])
+        with open(zip_path, "rb") as f:
+            st.download_button("⬇️ Download Full Project (ZIP)", f, file_name="project.zip")
     else:
-        st.info("No files generated yet. Please use the Chat tab first.")
+        st.info("No files yet. Generate from the Chat tab.")
 
-with tabs[2]:
-    st.header("Live Preview")
-    if st.session_state.app_code:
-        st.info("Below is a live preview of the generated Streamlit app. (Some features may not work in preview mode.)")
-        run_generated_app(st.session_state.app_code)
+# --- Tab 3: Preview ---
+with tab3:
+    st.subheader("Live Preview")
+    if "files" in st.session_state:
+        tmpdir = tempfile.mkdtemp()
+        app_file = os.path.join(tmpdir, "app.py")
+        with open(app_file, "w", encoding="utf-8") as f:
+            f.write(st.session_state["files"]["app.py"])
+
+        # Run streamlit app inside iframe
+        st.info("⚡ Preview runs only locally. On Streamlit Cloud, use download & deploy.")
+        st.code(open(app_file).read(), language="python")
     else:
-        st.info("No application code yet. Generate your app in the Chat tab.")
+        st.info("No app generated yet.")
