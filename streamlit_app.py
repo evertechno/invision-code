@@ -5,36 +5,38 @@ import shutil
 import tempfile
 import subprocess
 from pathlib import Path
-import google.generativeai as genai # Corrected import statement
-from google.generativeai import types # Corrected import statement
+import google.generativeai as genai
+from google.generativeai import types
 
 # ----------------------------------------------------
 # Gemini Client (Streamlit settings for API Key)
 # ----------------------------------------------------
 def get_gemini_client():
-    return genai.GenerativeModel( # genai.Client is deprecated, use GenerativeModel
-        model_name="gemini-2.5-flash", # Specify a model directly here
+    # Configure the API key globally before creating the model
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+
+    # Create the GenerativeModel instance
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
         generation_config={
             "temperature": 1,
             "max_output_tokens": 65535,
         },
-        safety_settings=[], # Safety settings can be provided here too
-        api_key=st.secrets["GEMINI_API_KEY"]  # pulled from Streamlit settings / Cloud
+        safety_settings=[],
     )
+    return model
 
 # ----------------------------------------------------
 # Generate Code using Gemini
 # ----------------------------------------------------
 def generate_code(prompt: str) -> dict:
     client = get_gemini_client()
-    # No need to specify model again if it's set in get_gemini_client()
     contents = [
         types.Content(
             role="user",
             parts=[types.Part.from_text(text=prompt)],
         ),
     ]
-    # No need to specify config again if it's set in get_gemini_client()
     response = client.generate_content(contents=contents)
     return {"app.py": response.text}
 
@@ -49,7 +51,7 @@ def package_project(files: dict) -> str:
 
     # Default files
     with open(os.path.join(tmpdir, "requirements.txt"), "w") as f:
-        f.write("streamlit\npython-dotenv\ngoogle-generativeai\n") # Updated library name
+        f.write("streamlit\npython-dotenv\ngoogle-generativeai\n")
 
     with open(os.path.join(tmpdir, ".env"), "w") as f:
         f.write("GEMINI_API_KEY=your-generated-app-key\n")
