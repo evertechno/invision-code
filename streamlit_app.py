@@ -3,11 +3,9 @@ import os
 import zipfile
 import shutil
 import tempfile
-import subprocess
+import re # Import regex for parsing
 from pathlib import Path
 import google.generativeai as genai
-# No longer importing 'types' as we're directly structuring content.
-# from google.generativeai import types
 
 # ----------------------------------------------------
 # Gemini Client (Streamlit settings for API Key)
@@ -17,33 +15,50 @@ def get_gemini_client():
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
     # Create the GenerativeModel instance
-    # It's good practice to get the model here, but the generation config
-    # can also be passed directly to generate_content. For simplicity and consistency,
-    # keeping it here for now.
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
-        # generation_config here will apply to this model instance by default.
         generation_config={
-            "temperature": 0.7, # Lowering temperature might lead to more direct code.
-            "max_output_tokens": 8192, # Adjusted for potential longer code. Max is 65535, but typically a smaller token limit for app.py
+            "temperature": 0.7,
+            "max_output_tokens": 8192,
         },
-        safety_settings=[], # Consider adding safety settings based on your needs
+        safety_settings=[],
     )
     return model
 
 # ----------------------------------------------------
 # Generate Code using Gemini
 # ----------------------------------------------------
-def generate_code(user_input_prompt: str) -> dict: # Renamed parameter for clarity
+def generate_code(user_input_prompt: str) -> dict:
     client = get_gemini_client()
 
-    # CRITICAL FIX: Make the prompt explicit that we ONLY want Python code for app.py.
-    # The current user_input_prompt will be augmented to guide Gemini.
+    # Modified prompt: Ask Gemini to generate ALL required files (app.py, requirements.txt, .env)
+    # Using specific markers to help parse the output.
     full_prompt = (
-        f"You are an AI code generator. Generate ONLY the Python code for a Streamlit application "
-        f"(`app.py` file) based on the following description. Do not include any "
-        f"explanations, setup instructions, or markdown beyond the code itself. "
-        f"Make sure the code is a complete, runnable `app.py` file.\n\n"
+        f"You are an AI code generator. Your task is to generate the complete code for a Streamlit "
+        f"application, including its `app.py` file, `requirements.txt` (listing all Python dependencies "
+        f"for `pip install`), and an `.env` file for necessary environment variables (if any, "
+        f"otherwise provide a placeholder). If the app requires Google Gemini API key, "
+        f"include `google-generativeai` in `requirements.txt` and `GEMINI_API_KEY=YOUR_API_KEY` "
+        f"in the `.env` file. Ensure `streamlit` and `python-dotenv` are always in `requirements.txt`. "
+        f"Strictly adhere to the following output format: use specific markdown code blocks "
+        f"with language annotations and a header for each file.\n\n"
+        f"--- File: app.py ---\n"
+        f"```python\n"
+        f"# Your app.py Streamlit code goes here\n"
+        f"```\n\n"
+        f"--- File: requirements.txt ---\n"
+        f"```txt\n"
+        f"# Your Python package dependencies go here\n"
+        f"```\n\n"
+        f"--- File: .env ---\n"
+        f"```ini\n" # or 'txt' for general env files
+        f"# Your environment variables go here\n"
+        f"```\n\n"
+        f"Do NOT include any additional explanations, setup instructions, or markdown "
+        f"outside of these defined file blocks. Ensure the content inside each block "
+        f"is valid for that file type. If a file isn't strictly necessary based on "
+        f"the app's description (e.g., no custom env vars), still provide the basic "
+        f"structure with standard content.\n\n"
         f"App Description:\n{user_input_prompt}"
     )
 
@@ -53,63 +68,137 @@ def generate_code(user_input_prompt: str) -> dict: # Renamed parameter for clari
     }
 
     response = client.generate_content(contents)
-    # Extract the text and remove potential leading/trailing markdown code blocks
     generated_text = response.text.strip()
-    if generated_text.startswith("```python") and generated_text.endswith("```"):
-        generated_text = generated_text[len("```python"): -len("```")].strip()
-    elif generated_text.startswith("```") and generated_text.endswith("```"): # for generic code blocks
-        generated_text = generated_text[len("```"): -len("```")].strip()
+
+    # --- New: Parse Gemini's response into multiple files ---
+    files = {}
+    # Use regex to find blocks for each file
+    # Example: --- File: app.py --- followed by ```python ... ```
+    file_pattern = re.compile(r"--- File: (\S+) ---\s*```(?:\S*)\n(.*?)\n```", re.DOTALL)
+    
+    matches = file_pattern.findall(generated_text)
+
+    for filename, content in matches:
+        files[filename.strip()] = content.strip()
+
+    # Ensure compulsory files are present, add defaults if Gemini missed them or if they're empty
+    if "app.py" not in files or not files["app.py"].strip():
+        st.error("Gemini failed to generate `app.py`. Providing a basic default.")
+        files["app.py"] = (
+            "import streamlit as st\n"
+            "import os\n"
+            "st.set_page_config(page_title='My Generated App')\n"
+            "st.title('Welcome to your Streamlit App!')\n"
+            "st.write('This app was generated by Invision Code.AI. Modify app.py to customize.')\n"
+            "if 'GEMINI_API_KEY' in os.environ:\n"
+            "    st.success('GEMINI_API_KEY found in environment variables.')\n"
+            "else:\n"
+            "    st.warning('GEMINI_API_KEY not found in environment variables. Check .env file or Streamlit secrets.')\n"
+        )
+    
+    # Ensure requirements.txt is present and includes basic dependencies
+    default_requirements = "streamlit\npython-dotenv\ngoogle-generativeai\n"
+    if "requirements.txt" not in files or not files["requirements.txt"].strip():
+        st.warning("Gemini did not generate a `requirements.txt` or it was empty. Providing a default.")
+        files["requirements.txt"] = default_requirements
+    else:
+        # Also ensure required basics are present if Gemini provides a custom list
+        existing_reqs = set(line.strip() for line in files["requirements.txt"].splitlines() if line.strip() and not line.strip().startswith("#"))
+        for req in ["streamlit", "python-dotenv", "google-generativeai"]:
+            if req not in existing_reqs:
+                files["requirements.txt"] += f"\n{req}"
+        # Clean up any potential duplicate blank lines or extra newlines
+        files["requirements.txt"] = "\n".join(sorted(list(set(line.strip() for line in files["requirements.txt"].splitlines() if line.strip())))) + "\n"
 
 
-    return {"app.py": generated_text}
+    # Ensure .env is present with a placeholder for GEMINI_API_KEY
+    if "env" not in files or not files[".env"].strip():
+        st.warning("Gemini did not generate a `.env` file or it was empty. Providing a default.")
+        files[".env"] = (
+            "# Your Gemini API Key goes here.\n"
+            "# Get one from: https://aistudio.google.com/app/apikey\n"
+            "GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE\n"
+        )
+    elif "GEMINI_API_KEY" not in files[".env"]: # If it generated an .env but missed the key
+        if not files[".env"].strip(): # if empty .env, add full placeholder
+             files[".env"] = (
+                "# Your Gemini API Key goes here.\n"
+                "# Get one from: https://aistudio.google.com/app/apikey\n"
+                "GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE\n"
+            )
+        else: # if not empty, just append the key line
+            files[".env"] += "\n# Add your Gemini API Key here\nGEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE\n"
+            # Deduplicate any API key lines if Gemini already put one in and we're adding
+            lines = []
+            seen_api_key = False
+            for line in files[".env"].splitlines():
+                if "GEMINI_API_KEY=" in line and not seen_api_key:
+                    lines.append("GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE") # Ensure placeholder
+                    seen_api_key = True
+                elif "GEMINI_API_KEY=" in line and seen_api_key:
+                    continue # skip subsequent API key lines
+                else:
+                    lines.append(line)
+            files[".env"] = "\n".join(lines).strip() + "\n"
+
+
+    # Include the README.md automatically. It's generated locally, not by Gemini.
+    # We put this directly in `package_project` instead to keep generation clean.
+
+    return files
 
 # ----------------------------------------------------
 # Package files into zip
 # ----------------------------------------------------
 def package_project(files: dict) -> str:
     tmpdir = tempfile.mkdtemp()
+
+    # Add all generated files to the temp directory
     for filename, content in files.items():
-        # Ensure that content for app.py is handled correctly if it ends up being a path.
-        # This part assumes 'content' is the actual string content of the file.
+        # Clean up potential extra # comments at the start of env/req files if present from parsing
+        if filename in ["requirements.txt", ".env"]:
+            content = re.sub(r"^\s*#\s*Your.*?here\s*\n", "", content, flags=re.IGNORECASE|re.MULTILINE).strip() + "\n"
+
         with open(os.path.join(tmpdir, filename), "w", encoding="utf-8") as f:
             f.write(content)
 
-    # Default files
-    with open(os.path.join(tmpdir, "requirements.txt"), "w") as f:
-        # Keep consistent with the library name
-        f.write("streamlit\npython-dotenv\ngoogle-generativeai\n")
+    # Always include the README.md which gives instructions
+    readme_content = """# Generated Streamlit App
 
-    # Important: Explain to the user where to put their API key
-    with open(os.path.join(tmpdir, ".env"), "w") as f:
-        f.write("# Your Gemini API Key goes here.\n")
-        f.write("# Get one from: https://aistudio.google.com/app/apikey\n")
-        f.write("GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE\n")
+This is a Streamlit application generated by Invision Code.AI.
 
-    with open(os.path.join(tmpdir, "README.md"), "w") as f:
-        f.write("# Generated Streamlit App\n\n")
-        f.write("This is a Streamlit application generated by Invision Code.AI.\n\n")
-        f.write("## Setup Instructions:\n")
-        f.write("1. **Create a virtual environment (optional but recommended):**\n")
-        f.write("   `python -m venv venv`\n")
-        f.write("   `source venv/bin/activate` (on macOS/Linux)\n")
-        f.write("   `venv\\Scripts\\activate` (on Windows)\n\n")
-        f.write("2. **Install dependencies:**\n")
-        f.write("   `pip install -r requirements.txt`\n\n")
-        f.write("3. **Set your Gemini API Key:**\n")
-        f.write("   Edit the `.env` file and replace `YOUR_GEMINI_API_KEY_HERE` with your actual API key.\n")
-        f.write("   You can get an API key from [Google AI Studio](https://aistudio.google.com/app/apikey).\n\n")
-        f.write("4. **Run the Streamlit application:**\n")
-        f.write("   `streamlit run app.py`\n\n")
-        f.write("Enjoy your generated app! 🚀\n")
+## Setup Instructions:
+1.  **Create a virtual environment (optional but recommended):**
+    ```bash
+    python -m venv venv
+    # On macOS/Linux:
+    source venv/bin/activate
+    # On Windows:
+    venv\\Scripts\\activate
+    ```
+2.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+3.  **Set your Gemini API Key (if the app requires it):**
+    Edit the `.env` file and replace `YOUR_GEMINI_API_KEY_HERE` with your actual API key.
+    You can get an API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+    **Important:** If deploying to Streamlit Cloud, you should add your `GEMINI_API_KEY` to the app's secrets in `secrets.toml` instead of using the `.env` file.
+4.  **Run the Streamlit application:**
+    ```bash
+    streamlit run app.py
+    ```
+Enjoy your generated app! 🚀
+"""
+    with open(os.path.join(tmpdir, "README.md"), "w", encoding="utf-8") as f:
+        f.write(readme_content)
 
     zip_path = os.path.join(tmpdir, "project.zip")
     with zipfile.ZipFile(zip_path, "w") as zipf:
         for root, _, filenames in os.walk(tmpdir):
             for filename in filenames:
-                if filename != "project.zip": # Don't include the zip file itself in the zip
+                if filename != "project.zip":
                     filepath = os.path.join(root, filename)
-                    # The arcname is important to ensure files are at the root of the zip
-                    # and not in a subdirectory like 'tmpdir/'
                     zipf.write(filepath, arcname=os.path.relpath(filepath, tmpdir))
 
     return zip_path
@@ -117,8 +206,9 @@ def package_project(files: dict) -> str:
 # ----------------------------------------------------
 # Streamlit Tabs
 # ----------------------------------------------------
-st.set_page_config(page_title="Invision Code.AI", layout="wide", initial_sidebar_state="collapsed") # collapsed sidebar
+st.set_page_config(page_title="Invision Code.AI", layout="wide", initial_sidebar_state="collapsed")
 
+# Inject custom CSS for styling (as previously)
 st.markdown(
     """
     <style>
@@ -176,12 +266,36 @@ st.markdown(
     .stSpinner > div > span {
         color: white;
     }
+    .stWarning {
+        background-color: rgba(255, 193, 7, 0.1);
+        border-left: 5px solid #ffc107;
+        padding: 1rem;
+        border-radius: 0.25rem;
+    }
+    .stError {
+        background-color: rgba(220, 53, 69, 0.1);
+        border-left: 5px solid #dc3545;
+        padding: 1rem;
+        border-radius: 0.25rem;
+    }
+    .stSuccess {
+        background-color: rgba(40, 167, 69, 0.1);
+        border-left: 5px solid #28a745;
+        padding: 1rem;
+        border-radius: 0.25rem;
+    }
+    .stInfo {
+        background-color: rgba(23, 162, 184, 0.1);
+        border-left: 5px solid #17a2b8;
+        padding: 1rem;
+        border-radius: 0.25rem;
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-st.markdown("<h1>💡 Invision Code.AI — Streamlit Application Generator <a href='https://github.com/your-repo-link-here' style='color: inherit; text-decoration: none;'><span style='font-size:0.7em;'>🔗</span></a></h1>", unsafe_allow_html=True) # Added a link to a hypothetical GitHub repo
+st.markdown("<h1>💡 Invision Code.AI — Streamlit Application Generator <a href='https://github.com/your-repo-link-here' style='color: inherit; text-decoration: none;'><span style='font-size:0.7em;'>🔗</span></a></h1>", unsafe_allow_html=True)
 
 tab1, tab2, tab3 = st.tabs(["💬 Chat", "📂 Code & Download", "🚀 Preview"])
 
@@ -194,9 +308,8 @@ with tab1:
             with st.spinner("Generating Streamlit app code with Gemini... This might take a moment."):
                 files = generate_code(user_prompt)
                 st.session_state["files"] = files
-                st.session_state["generation_complete"] = True # Set a flag
+                st.session_state["generation_complete"] = True
                 st.success("Code generated! Now go to the 'Code & Download' tab.")
-                # Optionally, switch to the code tab automatically (advanced, requires JS injection or direct tab change logic)
         else:
             st.warning("Please provide a description to generate code.")
 
@@ -204,28 +317,35 @@ with tab1:
 with tab2:
     st.subheader("Generated Files")
     if "files" in st.session_state and st.session_state["files"]:
-        st.info("The generated `app.py` code is shown below. You can download individual files or the whole project as a ZIP.")
+        st.info("Here are the generated project files. Download individual files or the whole project as a ZIP.")
 
-        for filename, content in st.session_state["files"].items():
+        # Display and download buttons for each generated file
+        for filename in sorted(st.session_state["files"].keys()): # Sort for consistent display order
+            content = st.session_state["files"][filename]
             col1, col2 = st.columns([0.2, 0.8])
             with col1:
                 st.download_button(
-                    f"⬇️ {filename}", # Added emoji for clarity
-                    data=content,
+                    f"⬇️ {filename}",
+                    data=content.encode("utf-8"), # Ensure content is bytes for download
                     file_name=filename,
                     mime="text/plain",
                     key=f"download_{filename}"
                 )
             with col2:
-                # Optionally add a small header for each file if there were multiple
                 st.markdown(f"**`{filename}`**")
-                st.code(content, language="python" if filename.endswith(".py") else "text")
+                # Detect language based on filename extension for better syntax highlighting
+                lang = "python" if filename.endswith(".py") else \
+                       "toml" if filename.endswith(".toml") else \
+                       "ini" if filename == ".env" else \
+                       "markdown" if filename.endswith(".md") else \
+                       "text"
+                st.code(content, language=lang)
 
-        st.markdown("---") # Separator
+        st.markdown("---")
 
         # Package project button
         if st.session_state.get("generation_complete", False):
-            # Only package when needed and when content is available
+            # Pass ALL files (including any defaults we might have set)
             zip_path = package_project(st.session_state["files"])
             with open(zip_path, "rb") as f:
                 st.download_button(
@@ -235,10 +355,8 @@ with tab2:
                     mime="application/zip",
                     use_container_width=True
                 )
-            # Clean up the temporary zip file after download if possible (Streamlit limitation: usually kept until script rerun)
-            # If using st.cache_data, might need a more explicit cleanup strategy.
             try:
-                os.remove(zip_path) # Attempt to remove the generated zip
+                os.remove(zip_path)
                 shutil.rmtree(os.path.dirname(zip_path)) # Remove the temporary directory
             except Exception as e:
                 st.warning(f"Could not fully clean up temporary files: {e}")
@@ -270,71 +388,47 @@ with tab3:
             st.code(app_content, language="python")
 
             # Disclaimer for API Key during preview
-            if "GEMINI_API_KEY" not in st.secrets or st.secrets["GEMINI_API_KEY"] == "your-generated-app-key":
-                st.error("💡 **Gemini API Key Missing:** For a functional preview, ensure your Streamlit secrets (`.streamlit/secrets.toml`) contain a valid `GEMINI_API_KEY`.")
+            if "GEMINI_API_KEY" not in st.secrets or st.secrets["GEMINI_API_KEY"] == "YOUR_GEMINI_API_KEY_HERE":
+                st.error("💡 **Gemini API Key Missing:** For a functional preview, ensure your Streamlit secrets (`.streamlit/secrets.toml`) contain a valid `GEMINI_API_KEY`. Or set it in your local `.env` if testing the downloaded project.")
 
-            # Create a temporary directory for the preview app
+            st.info("The actual 'running' preview requires saving files and executing `streamlit run app.py` in a separate environment, typically your local machine.")
+
+            # Create a temporary directory for the preview app to provide instructions
             tmp_preview_dir = tempfile.mkdtemp()
-            app_file_path = os.path.join(tmp_preview_dir, "app.py")
-            requirements_file_path = os.path.join(tmp_preview_dir, "requirements.txt")
-            env_file_path = os.path.join(tmp_preview_dir, ".env")
+            # Copy all relevant files for the "how to run" instructions
+            for filename, content in st.session_state["files"].items():
+                dest_path = os.path.join(tmp_preview_dir, filename)
+                with open(dest_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            # Add README.md to this temporary dir as well
+            with open(os.path.join(tmp_preview_dir, "README.md"), "w", encoding="utf-8") as f:
+                f.write(readme_content) # Use the same README content as for download
 
+            st.markdown(f"""
+            <div style="padding: 20px; border: 1px dashed #797C8B; border-radius: 10px; margin-top: 20px;">
+                <h3>To run this app yourself for a full preview:</h3>
+                <p>These files have been prepared in a temporary directory for you to test locally:</p>
+                <pre><code>cd {tmp_preview_dir}</code></pre>
+                <p>Then, following the `README.md` instructions:</p>
+                <pre><code>pip install -r requirements.txt<br>streamlit run app.py</code></pre>
+                <p>Remember to update the `GEMINI_API_KEY` in the `.env` file (if provided) before running!</p>
+            </div>
+            """, unsafe_allow_html=True)
 
-            try:
-                # Write app.py
-                with open(app_file_path, "w", encoding="utf-8") as f:
-                    f.write(app_content)
+            # Cleanup for preview files. Providing a button for explicit user action.
+            # Using a session state variable to store tmp_preview_dir for cleanup button
+            st.session_state["tmp_preview_dir_for_cleanup"] = tmp_preview_dir
+            if st.button("Clean up Preview Files", help="Deletes the temporary directory created for the preview (if it exists).", use_container_width=True, key="cleanup_preview_btn"):
+                if "tmp_preview_dir_for_cleanup" in st.session_state and os.path.exists(st.session_state["tmp_preview_dir_for_cleanup"]):
+                    try:
+                        shutil.rmtree(st.session_state["tmp_preview_dir_for_cleanup"])
+                        st.success(f"Cleaned up preview directory: {st.session_state['tmp_preview_dir_for_cleanup']}")
+                        del st.session_state["tmp_preview_dir_for_cleanup"] # Remove from session state
+                    except Exception as e:
+                        st.error(f"Error cleaning up preview directory: {e}")
+                else:
+                    st.info("No temporary preview files to clean up or path not found.")
 
-                # Write minimal requirements.txt
-                with open(requirements_file_path, "w", encoding="utf-8") as f:
-                    f.write("streamlit\n")
-                    f.write("google-generativeai\n") # Assuming most apps will use this
-                    # Add any other common deps or try to infer from app_content
-
-                # Write a placeholder .env if not using secrets, or if it might be useful for local run
-                with open(env_file_path, "w", encoding="utf-8") as f:
-                    if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"] != "your-generated-app-key":
-                         f.write(f"GEMINI_API_KEY={st.secrets['GEMINI_API_KEY']}\n")
-                    else:
-                         f.write("GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE # Fill this for local test if needed\n")
-
-                # You can try to run it in a subprocess and display its output or status
-                # However, running a full Streamlit app *inside* another Streamlit app's iframe is complex and limited.
-                # A more realistic "preview" in this context is often just displaying the code and explaining how to run it.
-
-                # If you genuinely wanted to *run* it and display output, you'd launch it
-                # as a separate process and embed an iframe to its localhost address.
-                # This requires that your Streamlit generator itself is running on a server that allows this,
-                # and often needs to expose a port for the sub-app. This is beyond typical Streamlit cloud capabilities.
-                #
-                # For this application, displaying the code and giving instructions is the most reliable "preview."
-                st.markdown(f"""
-                <div style="padding: 20px; border: 1px dashed #797C8B; border-radius: 10px; margin-top: 20px;">
-                    <h3>To run this preview locally on your machine:</h3>
-                    <p>Open a new terminal, navigate to this project's temporary preview directory:</p>
-                    <pre><code>cd {tmp_preview_dir}<br>streamlit run app.py</code></pre>
-                    <p>Then open the provided URL in your browser.</p>
-                </div>
-                """, unsafe_allow_html=True)
-
-
-            except Exception as e:
-                st.error(f"Error preparing preview: {e}")
-            finally:
-                # Attempt to clean up the temporary preview directory
-                # This might not execute immediately depending on Streamlit's lifecycle
-                pass # Delay cleanup, or provide a button
-
-        # Add a cleanup button for the temporary preview files
-        if st.button("Clean up Preview Files", help="Deletes the temporary directory created for the preview.", use_container_width=True):
-            if "tmp_preview_dir" in locals() and os.path.exists(tmp_preview_dir):
-                try:
-                    shutil.rmtree(tmp_preview_dir)
-                    st.success(f"Cleaned up preview directory: {tmp_preview_dir}")
-                except Exception as e:
-                    st.error(f"Error cleaning up preview directory {tmp_preview_dir}: {e}")
-            else:
-                st.info("No temporary preview files to clean up or path not found.")
 
     else:
         st.info("No app generated yet. Go to the 'Chat' tab to create one!")
