@@ -6,7 +6,8 @@ import tempfile
 import subprocess
 from pathlib import Path
 import google.generativeai as genai
-from google.generativeai import types
+# types is not needed for direct content creation this way
+# from google.generativeai import types
 
 # ----------------------------------------------------
 # Gemini Client (Streamlit settings for API Key)
@@ -31,13 +32,16 @@ def get_gemini_client():
 # ----------------------------------------------------
 def generate_code(prompt: str) -> dict:
     client = get_gemini_client()
-    contents = [
-        types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=prompt)],
-        ),
-    ]
-    response = client.generate_content(contents=contents)
+    # Correct way to structure content for genai.GenerativeModel.generate_content
+    # Pass the prompt directly as a string, or a dictionary if you need roles.
+    # For a single user prompt, a string is often sufficient.
+    # If you need to specify roles explicitly for more complex multi-turn, use:
+    contents = {
+        "role": "user",
+        "parts": [{"text": prompt}],
+    }
+
+    response = client.generate_content(contents)
     return {"app.py": response.text}
 
 # ----------------------------------------------------
