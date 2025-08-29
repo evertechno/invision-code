@@ -1,5 +1,3 @@
-# main.py — Invision Code.AI
-
 import streamlit as st
 import os
 import zipfile
@@ -7,14 +5,20 @@ import shutil
 import tempfile
 import subprocess
 from pathlib import Path
-from google import genai
-from google.genai import types
+import google.generativeai as genai # Corrected import statement
+from google.generativeai import types # Corrected import statement
 
 # ----------------------------------------------------
 # Gemini Client (Streamlit settings for API Key)
 # ----------------------------------------------------
 def get_gemini_client():
-    return genai.Client(
+    return genai.GenerativeModel( # genai.Client is deprecated, use GenerativeModel
+        model_name="gemini-2.5-flash", # Specify a model directly here
+        generation_config={
+            "temperature": 1,
+            "max_output_tokens": 65535,
+        },
+        safety_settings=[], # Safety settings can be provided here too
         api_key=st.secrets["GEMINI_API_KEY"]  # pulled from Streamlit settings / Cloud
     )
 
@@ -23,19 +27,15 @@ def get_gemini_client():
 # ----------------------------------------------------
 def generate_code(prompt: str) -> dict:
     client = get_gemini_client()
-    model = "gemini-2.5-flash"
+    # No need to specify model again if it's set in get_gemini_client()
     contents = [
         types.Content(
             role="user",
             parts=[types.Part.from_text(text=prompt)],
         ),
     ]
-    config = types.GenerateContentConfig(
-        temperature=1,
-        max_output_tokens=65535,
-        safety_settings=[],
-    )
-    response = client.models.generate_content(model=model, contents=contents, config=config)
+    # No need to specify config again if it's set in get_gemini_client()
+    response = client.generate_content(contents=contents)
     return {"app.py": response.text}
 
 # ----------------------------------------------------
@@ -49,7 +49,7 @@ def package_project(files: dict) -> str:
 
     # Default files
     with open(os.path.join(tmpdir, "requirements.txt"), "w") as f:
-        f.write("streamlit\npython-dotenv\ngoogle-genai\n")
+        f.write("streamlit\npython-dotenv\ngoogle-generativeai\n") # Updated library name
 
     with open(os.path.join(tmpdir, ".env"), "w") as f:
         f.write("GEMINI_API_KEY=your-generated-app-key\n")
